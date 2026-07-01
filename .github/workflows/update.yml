@@ -3,7 +3,7 @@ name: Temperatuurgrafiek bijwerken
 # Wanneer draait dit?
 on:
   schedule:
-    - cron: "30 4 * * *"      # elke dag om 04:30 UTC (~06:30 Belgische zomertijd)
+    - cron: "5 * * * *"       # elk uur (rond :05 na het uur, UTC)
   workflow_dispatch: {}         # + handmatig te starten via de knop "Run workflow"
 
 # Rechten die de workflow nodig heeft om naar GitHub Pages te publiceren
@@ -31,7 +31,7 @@ jobs:
           NETATMO_CLIENT_ID: ${{ secrets.NETATMO_CLIENT_ID }}
           NETATMO_CLIENT_SECRET: ${{ secrets.NETATMO_CLIENT_SECRET }}
           NETATMO_REFRESH_TOKEN: ${{ secrets.NETATMO_REFRESH_TOKEN }}
-          DAYS: "30"
+          HOURLY_DAYS: "42"
           LAT: "51.212"
           LON: "4.399"
         run: python3 scripts/build.py
