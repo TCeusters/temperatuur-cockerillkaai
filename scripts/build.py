@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Bouwt een grafiek (index.html) + data.csv met twee lijnen:
-  1. Binnentemperatuur van je Netatmo weerstation (per uur)
+  1. Binnentemperatuur van je Netatmo-toestel (weerstation of Home Coach), per uur
   2. Buitentemperatuur op de Cockerillkaai, Antwerpen (Open-Meteo, per uur)
 
 Gebruikt enkel de Python-standaardbibliotheek (geen pip install nodig).
@@ -33,6 +33,7 @@ from zoneinfo import ZoneInfo
 TZ = ZoneInfo("Europe/Brussels")
 NETATMO_TOKEN_URL = "https://api.netatmo.com/oauth2/token"
 NETATMO_STATIONS_URL = "https://api.netatmo.com/api/getstationsdata"
+NETATMO_HOMECOACH_URL = "https://api.netatmo.com/api/gethomecoachsdata"
 NETATMO_MEASURE_URL = "https://api.netatmo.com/api/getmeasure"
 OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
 
@@ -109,30 +110,43 @@ def netatmo_refresh_access_token():
 
 
 # --------------------------------------------------------------------------
-# 2. Netatmo: binnenmodule vinden + uurdata ophalen
+# 2. Netatmo: toestel vinden (weerstation of Home Coach) + uurdata ophalen
 # --------------------------------------------------------------------------
 def netatmo_get_indoor_series(access_token, days):
     headers = {"Authorization": f"Bearer {access_token}"}
 
-    try:
-        stations = http_get(NETATMO_STATIONS_URL, headers=headers)
-    except urllib.error.HTTPError as e:
-        detail = e.read().decode("utf-8", "ignore")
-        die(f"getstationsdata mislukt (HTTP {e.code}). Antwoord: {detail}")
+    def fetch_devices(url, label):
+        try:
+            resp = http_get(url, headers=headers)
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode("utf-8", "ignore")
+            print(f"Info: {label} gaf HTTP {e.code}: {detail}")
+            return []
+        if isinstance(resp, dict) and resp.get("error"):
+            print(f"Info: {label} gaf een foutmelding: {resp.get('error')}")
+        return resp.get("body", {}).get("devices", []) or []
 
-    devices = stations.get("body", {}).get("devices", [])
+    # Eerst zoeken naar een weerstation, daarna naar een Home Coach.
+    device_type = "weerstation"
+    devices = fetch_devices(NETATMO_STATIONS_URL, "getstationsdata (weerstation)")
     if not devices:
-        die("Geen Netatmo-weerstation gevonden op dit account.")
+        device_type = "Home Coach"
+        devices = fetch_devices(NETATMO_HOMECOACH_URL, "gethomecoachsdata (Home Coach)")
+
+    if not devices:
+        die("Geen Netatmo-toestel gevonden op dit account (noch weerstation, noch Home Coach). "
+            "Controleer dat het token de scopes 'read_station' EN 'read_homecoach' bevat, en dat je "
+            "op dev.netatmo.com hetzelfde account gebruikt als in de Netatmo-app.")
 
     device = devices[0]
-    device_id = device["_id"]                      # MAC van het basisstation
+    device_id = device["_id"]                      # MAC van het toestel
     station_name = device.get("station_name") or device.get("home_name") or "Netatmo"
     indoor_name = device.get("module_name", "Binnen")
 
     date_begin = int((datetime.now(tz=timezone.utc) - timedelta(days=days)).timestamp())
 
     params = {
-        "device_id": device_id,       # binnenmodule = het basisstation zelf
+        "device_id": device_id,       # binnenmodule = het toestel zelf
         "scale": "1hour",
         "type": "temperature",
         "date_begin": date_begin,
@@ -156,7 +170,8 @@ def netatmo_get_indoor_series(access_token, days):
     if not series:
         die("Geen binnentemperatuur-metingen ontvangen van Netatmo.")
 
-    print(f"Netatmo: {len(series)} uurwaarden opgehaald ({station_name} / {indoor_name}).")
+    print(f"Netatmo: {len(series)} uurwaarden opgehaald "
+          f"({device_type}: {station_name} / {indoor_name}).")
     return series, station_name, indoor_name
 
 
