@@ -342,7 +342,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
   h1 { font-size: 18px; margin: 0; }
   .badge { color: #8a8a8a; font-size: 12px; }
   .stats { display: flex; gap: 12px; flex-wrap: wrap; margin: 14px 0 6px; }
-  .stat { flex: 1 1 200px; background: #fff; border: 1px solid #e5e5e5; border-radius: 12px; padding: 14px 16px; }
+  .stat { flex: 1 1 calc(25% - 9px); background: #fff; border: 1px solid #e5e5e5; border-radius: 12px; padding: 14px 16px; }
   .stat-label { font-size: 12px; color: #666; }
   .stat-val { font-size: 34px; font-weight: 650; line-height: 1.05; margin-top: 4px; }
   .stat.in .stat-val { color: #e11d48; }
@@ -370,6 +370,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
   @media (max-width: 640px) {
     body { padding: 12px; }
     h1 { font-size: 15px; }
+    .stat { flex: 1 1 calc(50% - 6px); }
     .stat-val { font-size: 30px; }
     .chartbox { height: 62vh; min-height: 360px; }
     .card { padding: 10px; }
