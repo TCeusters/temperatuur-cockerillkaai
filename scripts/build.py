@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-Bouwt een interactieve grafiekpagina (index.html + data.json + data.csv):
+Bouwt een interactieve, responsieve grafiekpagina (index.html + data.json + data.csv):
   - Binnentemperatuur van je Netatmo-toestel (weerstation of Home Coach)
   - Buitentemperatuur op de Cockerillkaai, Antwerpen (Open-Meteo)
 
-Twee datasets worden opgehaald, zodat de pagina snel blijft:
-  * DAGdata over de VOLLEDIGE geschiedenis (compact) -> voor dag/week/maand
-  * UURdata over de laatste ~6 weken            -> voor de uur-weergave
+Boven de grafiek: de HUIDIGE binnen- en buitentemperatuur (live-meting van het
+toestel + Open-Meteo). De grafiek zelf: keuze uur/dag/week/maand (met gemiddelde),
+periodekiezer en een verversknop.
 
-De pagina zelf regelt de periodekeuze, de granulariteit (uur/dag/week/maand,
-met gemiddelde) en toont wanneer ze laatst is bijgewerkt.
+Twee datasets houden de pagina snel:
+  * DAGdata over de VOLLEDIGE geschiedenis  -> dag/week/maand
+  * UURdata over de laatste ~6 weken        -> uur-weergave
 
 Enkel Python-standaardbibliotheek. Draait in GitHub Actions.
 
@@ -64,6 +65,21 @@ def http_post_form(url, data):
         return json.loads(resp.read().decode("utf-8"))
 
 
+def fmt_epoch(ts):
+    if not ts:
+        return None
+    return datetime.fromtimestamp(int(ts), tz=timezone.utc).astimezone(TZ).strftime("%d-%m %H:%M")
+
+
+def fmt_iso(s):
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(s).strftime("%d-%m %H:%M")
+    except ValueError:
+        return None
+
+
 # --------------------------------------------------------------------------
 # 1. Netatmo: token vernieuwen
 # --------------------------------------------------------------------------
@@ -96,7 +112,7 @@ def netatmo_refresh_access_token():
 
 
 # --------------------------------------------------------------------------
-# 2. Netatmo: toestel vinden (weerstation of Home Coach)
+# 2. Netatmo: toestel vinden (weerstation of Home Coach) + live-meting
 # --------------------------------------------------------------------------
 def netatmo_find_device(access):
     headers = {"Authorization": f"Bearer {access}"}
@@ -122,12 +138,17 @@ def netatmo_find_device(access):
             "op dev.netatmo.com hetzelfde account gebruikt als in de Netatmo-app.")
 
     d = devices[0]
+    dash = d.get("dashboard_data") or {}
     return {
         "id": d["_id"],
         "station": d.get("station_name") or d.get("home_name") or "Netatmo",
         "module": d.get("module_name", "Binnen"),
         "date_setup": int(d.get("date_setup") or 0),
         "type": device_type,
+        "cur_in": dash.get("Temperature"),
+        "cur_in_time": fmt_epoch(dash.get("time_utc")),
+        "cur_hum": dash.get("Humidity"),
+        "cur_co2": dash.get("CO2"),
     }
 
 
@@ -185,10 +206,8 @@ def netatmo_hourly_recent(access, device_id, days):
 # 3. Open-Meteo: buitentemperatuur
 # --------------------------------------------------------------------------
 def openmeteo_daily(lat, lon, start_date):
-    """Dagelijkse gemiddelde buitentemp: archief (oud) + forecast (recent)."""
     today = datetime.now(tz=TZ).strftime("%Y-%m-%d")
     out = {}
-    # Archief (loopt ~2-5 dagen achter)
     try:
         p = {"latitude": lat, "longitude": lon, "start_date": start_date, "end_date": today,
              "daily": "temperature_2m_mean", "timezone": "Europe/Brussels"}
@@ -199,7 +218,6 @@ def openmeteo_daily(lat, lon, start_date):
                 out[d] = round(float(t), 1)
     except urllib.error.HTTPError as e:
         print(f"Info: Open-Meteo archief gaf HTTP {e.code}: {e.read().decode('utf-8', 'ignore')}")
-    # Recente dagen opvullen via forecast
     try:
         p = {"latitude": lat, "longitude": lon, "daily": "temperature_2m_mean",
              "past_days": 14, "forecast_days": 1, "timezone": "Europe/Brussels"}
@@ -215,8 +233,9 @@ def openmeteo_daily(lat, lon, start_date):
 
 
 def openmeteo_hourly(lat, lon, days):
+    """Uurdata: verleden (past_days) + toekomst (forecast_days) in één set."""
     p = {"latitude": lat, "longitude": lon, "hourly": "temperature_2m",
-         "past_days": min(days, 92), "forecast_days": 1, "timezone": "Europe/Brussels"}
+         "past_days": min(days, 92), "forecast_days": 3, "timezone": "Europe/Brussels"}
     try:
         data = http_get(OPEN_METEO_FORECAST_URL + "?" + urllib.parse.urlencode(p))
     except urllib.error.HTTPError as e:
@@ -226,14 +245,25 @@ def openmeteo_hourly(lat, lon, days):
                        data.get("hourly", {}).get("temperature_2m", [])):
         if temp is not None:
             out[t[:13] + ":00"] = round(float(temp), 1)
-    print(f"Open-Meteo uurdata: {len(out)} uren.")
     return out
+
+
+def openmeteo_current(lat, lon):
+    p = {"latitude": lat, "longitude": lon, "current": "temperature_2m", "timezone": "Europe/Brussels"}
+    try:
+        data = http_get(OPEN_METEO_FORECAST_URL + "?" + urllib.parse.urlencode(p))
+    except urllib.error.HTTPError as e:
+        print(f"Info: Open-Meteo current gaf HTTP {e.code}: {e.read().decode('utf-8', 'ignore')}")
+        return None, None
+    c = data.get("current", {})
+    t = c.get("temperature_2m")
+    return (round(float(t), 1) if t is not None else None), fmt_iso(c.get("time"))
 
 
 # --------------------------------------------------------------------------
 # 4. Samenvoegen en wegschrijven
 # --------------------------------------------------------------------------
-def build_outputs(dev, in_daily, out_daily, in_hourly, out_hourly, lat, lon):
+def build_outputs(dev, in_daily, out_daily, in_hourly, out_hourly, forecast, cur_out, cur_out_t, lat, lon):
     os.makedirs(OUT_DIR, exist_ok=True)
 
     daily_keys = sorted(set(in_daily) | set(out_daily))
@@ -242,17 +272,21 @@ def build_outputs(dev, in_daily, out_daily, in_hourly, out_hourly, lat, lon):
     hourly_keys = sorted(set(in_hourly) | set(out_hourly))
     hourly = [{"t": k, "binnen": in_hourly.get(k), "buiten": out_hourly.get(k)} for k in hourly_keys]
 
+    forecast_list = [{"t": k, "buiten": forecast[k]} for k in sorted(forecast)]
+
     data = {
         "station": dev["station"], "indoor_name": dev["module"], "device_type": dev["type"],
         "updated": datetime.now(tz=TZ).strftime("%d-%m-%Y %H:%M"),
         "lat": str(lat), "lon": str(lon),
+        "current_in": dev.get("cur_in"), "current_in_time": dev.get("cur_in_time"),
+        "current_out": cur_out, "current_out_time": cur_out_t,
+        "current_hum": dev.get("cur_hum"), "current_co2": dev.get("cur_co2"),
         "hourly_from": hourly[0]["t"] if hourly else None,
-        "daily": daily, "hourly": hourly,
+        "daily": daily, "hourly": hourly, "forecast": forecast_list,
     }
     with open(os.path.join(OUT_DIR, "data.json"), "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
 
-    # CSV = dagdata (handig voor Excel)
     with open(os.path.join(OUT_DIR, "data.csv"), "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=["datum", "binnen_gem_C", "buiten_gem_C"])
         w.writeheader()
@@ -275,27 +309,46 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <title>Temperatuur: binnen vs. buiten (Cockerillkaai)</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <style>
+  * { box-sizing: border-box; }
   body { font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
-         margin: 0; padding: 24px; color: #1a1a1a; background: #fafafa; }
+         margin: 0; padding: 20px; color: #1a1a1a; background: #fafafa; }
   .wrap { max-width: 1040px; margin: 0 auto; }
-  .head { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
-  h1 { font-size: 19px; margin: 0; }
+  .head { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 6px; }
+  h1 { font-size: 18px; margin: 0; }
   .badge { color: #8a8a8a; font-size: 12px; }
-  .controls { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin: 16px 0 8px; }
-  .seg button { border: 1px solid #d0d0d0; background: #fff; padding: 6px 12px; cursor: pointer;
-                font-size: 13px; }
+  .stats { display: flex; gap: 12px; flex-wrap: wrap; margin: 14px 0 6px; }
+  .stat { flex: 1 1 200px; background: #fff; border: 1px solid #e5e5e5; border-radius: 12px; padding: 14px 16px; }
+  .stat-label { font-size: 12px; color: #666; }
+  .stat-val { font-size: 34px; font-weight: 650; line-height: 1.05; margin-top: 4px; }
+  .stat.in .stat-val { color: #e11d48; }
+  .stat.out .stat-val { color: #2563eb; }
+  .stat.hum .stat-val { color: #0891b2; }
+  .stat.co2 .stat-val { color: #65a30d; }
+  .stat-time { font-size: 11px; color: #9a9a9a; margin-top: 3px; }
+  .controls { display: flex; gap: 10px 12px; align-items: center; flex-wrap: wrap; margin: 14px 0 6px; }
+  .seg button { border: 1px solid #d0d0d0; background: #fff; padding: 7px 13px; cursor: pointer; font-size: 13px; }
   .seg button:first-child { border-radius: 6px 0 0 6px; }
   .seg button:last-child { border-radius: 0 6px 6px 0; }
   .seg button + button { border-left: none; }
   .seg button.active { background: #1a1a1a; color: #fff; border-color: #1a1a1a; }
-  select, input[type=date] { padding: 6px 8px; font-size: 13px; border: 1px solid #d0d0d0;
-                             border-radius: 6px; background: #fff; }
-  .note { color: #a15c00; font-size: 12px; min-height: 16px; margin: 2px 0 8px; }
-  .card { background: #fff; border: 1px solid #e5e5e5; border-radius: 10px; padding: 20px;
+  select, input[type=date] { padding: 7px 8px; font-size: 13px; border: 1px solid #d0d0d0; border-radius: 6px; background: #fff; }
+  #refresh { padding: 7px 13px; font-size: 13px; border: 1px solid #d0d0d0; border-radius: 6px;
+             background: #fff; cursor: pointer; }
+  #refresh:active { background: #eee; }
+  .note { color: #a15c00; font-size: 12px; min-height: 15px; margin: 2px 0 8px; }
+  .card { background: #fff; border: 1px solid #e5e5e5; border-radius: 12px; padding: 16px;
           box-shadow: 0 1px 3px rgba(0,0,0,0.04); }
-  .foot { color: #888; font-size: 12px; margin-top: 16px; }
+  .chartbox { position: relative; height: 58vh; min-height: 320px; }
+  .foot { color: #888; font-size: 12px; margin-top: 14px; }
   a { color: #2563eb; }
   label { font-size: 13px; color: #555; }
+  @media (max-width: 640px) {
+    body { padding: 12px; }
+    h1 { font-size: 15px; }
+    .stat-val { font-size: 30px; }
+    .chartbox { height: 62vh; min-height: 360px; }
+    .card { padding: 10px; }
+  }
 </style>
 </head>
 <body>
@@ -304,6 +357,30 @@ INDEX_HTML = r"""<!DOCTYPE html>
     <h1 id="title">Binnen vs. buiten</h1>
     <span class="badge" id="updated"></span>
   </div>
+
+  <div class="stats">
+    <div class="stat in">
+      <div class="stat-label">Binnen nu (Netatmo)</div>
+      <div class="stat-val" id="curIn">–</div>
+      <div class="stat-time" id="curInT"></div>
+    </div>
+    <div class="stat out">
+      <div class="stat-label">Buiten nu (Cockerillkaai)</div>
+      <div class="stat-val" id="curOut">–</div>
+      <div class="stat-time" id="curOutT"></div>
+    </div>
+    <div class="stat hum">
+      <div class="stat-label">Vochtigheid binnen</div>
+      <div class="stat-val" id="curHum">–</div>
+      <div class="stat-time"></div>
+    </div>
+    <div class="stat co2">
+      <div class="stat-label">CO₂ binnen</div>
+      <div class="stat-val" id="curCo2">–</div>
+      <div class="stat-time" id="curCo2T"></div>
+    </div>
+  </div>
+
   <div class="controls">
     <div class="seg" id="gran">
       <button data-g="uur">Uur</button>
@@ -325,32 +402,65 @@ INDEX_HTML = r"""<!DOCTYPE html>
       <input type="date" id="from"> – <input type="date" id="to">
     </span>
   </div>
+
   <div class="note" id="note"></div>
-  <div class="card"><canvas id="grafiek" height="120"></canvas></div>
+  <div class="card"><div class="chartbox"><canvas id="grafiek"></canvas></div></div>
   <div class="foot">
     Buitentemperatuur: Open-Meteo (<span id="coord"></span>).
     &nbsp;|&nbsp; <a href="data.csv" download>Download dagdata (CSV)</a>
   </div>
 </div>
 <script>
-let DATA = null, chart = null;
+let DATA = null, chart = null, wired = false;
 const $ = id => document.getElementById(id);
 const LS = { get:(k,d)=>localStorage.getItem('ck_'+k)||d, set:(k,v)=>localStorage.setItem('ck_'+k,v) };
 
-fetch('data.json', {cache:'no-store'})
-  .then(r => r.json())
-  .then(d => { DATA = d; boot(); })
-  .catch(e => { $('note').textContent = 'Kon data niet laden: ' + e; });
+function loadData(){
+  fetch('data.json?t=' + Date.now(), {cache:'no-store'})
+    .then(r => r.json())
+    .then(d => { DATA = d; onData(); })
+    .catch(e => { $('note').textContent = 'Kon data niet laden: ' + e; });
+}
+loadData();
 
-function boot(){
+function onData(){
   $('title').textContent = 'Binnentemperatuur (' + DATA.station + ' – ' + DATA.indoor_name + ') vs. buiten Cockerillkaai';
   $('coord').textContent = DATA.lat + ', ' + DATA.lon;
   $('updated').textContent = 'bijgewerkt: ' + DATA.updated;
+  showCurrent();
+  refreshOutdoorLive();
+  if (!wired) wireControls();
+  render();
+}
 
-  let g = LS.get('g', 'dag');
+function showCurrent(){
+  $('curIn').textContent  = DATA.current_in  != null ? Number(DATA.current_in).toFixed(1)  + ' °C' : '–';
+  $('curInT').textContent = DATA.current_in_time ? 'om ' + DATA.current_in_time : '';
+  $('curOut').textContent  = DATA.current_out != null ? Number(DATA.current_out).toFixed(1) + ' °C' : '–';
+  $('curOutT').textContent = DATA.current_out_time ? 'om ' + DATA.current_out_time : '';
+  $('curHum').textContent  = DATA.current_hum != null ? Math.round(DATA.current_hum) + ' %' : '–';
+  $('curCo2').textContent  = DATA.current_co2 != null ? Math.round(DATA.current_co2) + ' ppm' : '–';
+  $('curCo2T').textContent = DATA.current_in_time ? 'om ' + DATA.current_in_time : '';
+}
+
+function refreshOutdoorLive(){
+  const url = 'https://api.open-meteo.com/v1/forecast?latitude=' + DATA.lat +
+              '&longitude=' + DATA.lon + '&current=temperature_2m&timezone=Europe%2FBrussels';
+  fetch(url, {cache:'no-store'}).then(r => r.json()).then(d => {
+    const c = d.current;
+    if (c && c.temperature_2m != null){
+      $('curOut').textContent = Number(c.temperature_2m).toFixed(1) + ' °C';
+      $('curOutT').textContent = 'live';
+    }
+  }).catch(()=>{});
+}
+
+function wireControls(){
+  wired = true;
+  const g = LS.get('g', 'dag');
   document.querySelectorAll('#gran button').forEach(b => {
     b.classList.toggle('active', b.dataset.g === g);
-    b.onclick = () => { setGran(b.dataset.g); };
+    b.onclick = () => setGran(b.dataset.g);
   });
   $('period').value = LS.get('period', '30');
   $('from').value = LS.get('from', '');
@@ -359,7 +469,6 @@ function boot(){
   $('from').onchange = () => { LS.set('from', $('from').value); render(); };
   $('to').onchange = () => { LS.set('to', $('to').value); render(); };
   toggleCustom();
-  render();
 }
 
 function setGran(g){
@@ -367,30 +476,25 @@ function setGran(g){
   document.querySelectorAll('#gran button').forEach(b => b.classList.toggle('active', b.dataset.g === g));
   render();
 }
-function toggleCustom(){
-  $('customRange').style.display = $('period').value === 'custom' ? 'inline' : 'none';
-}
+function toggleCustom(){ $('customRange').style.display = $('period').value === 'custom' ? 'inline' : 'none'; }
 
 function periodBounds(){
   const p = $('period').value;
   if (p === 'custom') return { start: $('from').value || '0000-01-01', end: $('to').value || '9999-12-31' };
   if (p === 'all')    return { start: '0000-01-01', end: '9999-12-31' };
-  const days = parseInt(p, 10);
-  const s = new Date(Date.now() - days*86400000);
+  const s = new Date(Date.now() - parseInt(p,10)*86400000);
   return { start: s.toISOString().slice(0,10), end: '9999-12-31' };
 }
 
 function avg(a){ return a.length ? Math.round(a.reduce((x,y)=>x+y,0)/a.length*10)/10 : null; }
-
 function isoWeek(ds){
   const d = new Date(ds + 'T00:00:00Z');
   const day = (d.getUTCDay() + 6) % 7;
   d.setUTCDate(d.getUTCDate() - day + 3);
-  const firstThu = new Date(Date.UTC(d.getUTCFullYear(), 0, 4));
-  const week = 1 + Math.round(((d - firstThu)/86400000 - 3 + ((firstThu.getUTCDay()+6)%7))/7);
+  const f = new Date(Date.UTC(d.getUTCFullYear(), 0, 4));
+  const week = 1 + Math.round(((d - f)/86400000 - 3 + ((f.getUTCDay()+6)%7))/7);
   return { year: d.getUTCFullYear(), week };
 }
-
 function groupDaily(points, keyFn, labelFn){
   const m = new Map();
   for (const p of points){
@@ -401,62 +505,61 @@ function groupDaily(points, keyFn, labelFn){
     if (p.buiten != null) g.o.push(p.buiten);
   }
   const keys = [...m.keys()].sort();
-  return {
-    labels: keys.map(k => m.get(k).label),
-    binnen: keys.map(k => avg(m.get(k).b)),
-    buiten: keys.map(k => avg(m.get(k).o)),
-  };
+  return { labels: keys.map(k=>m.get(k).label), binnen: keys.map(k=>avg(m.get(k).b)), buiten: keys.map(k=>avg(m.get(k).o)) };
 }
 
 function buildSeries(){
   const { start, end } = periodBounds();
   const g = LS.get('g', 'dag');
   $('note').textContent = '';
-
   if (g === 'uur'){
     const pts = DATA.hourly.filter(p => p.t.slice(0,10) >= start && p.t.slice(0,10) <= end);
-    if (DATA.hourly_from && start < DATA.hourly_from.slice(0,10)){
-      $('note').textContent = 'Uurweergave is beschikbaar vanaf ' + DATA.hourly_from.slice(0,10) +
-        '. Voor oudere periodes: kies Dag, Week of Maand.';
+    if (DATA.hourly_from && start < DATA.hourly_from.slice(0,10))
+      $('note').textContent = 'Uurweergave is beschikbaar vanaf ' + DATA.hourly_from.slice(0,10) + '. Kies Dag/Week/Maand voor oudere periodes.';
+    const fc = (DATA.forecast || []).filter(p => p.t.slice(0,10) <= end);
+    const fmt = t => t.slice(8,10)+'-'+t.slice(5,7)+' '+t.slice(11,16);
+    const labels = pts.map(p => fmt(p.t)).concat(fc.map(p => fmt(p.t)));
+    const binnen = pts.map(p => p.binnen).concat(fc.map(() => null));
+    const buiten = pts.map(p => p.buiten).concat(fc.map(() => null));
+    const verwacht = pts.map(() => null).concat(fc.map(p => p.buiten));
+    if (pts.length && fc.length){
+      for (let i = pts.length - 1; i >= 0; i--){ if (pts[i].buiten != null){ verwacht[i] = pts[i].buiten; break; } }
     }
-    return {
-      labels: pts.map(p => p.t.slice(8,10)+'-'+p.t.slice(5,7)+' '+p.t.slice(11,16)),
-      binnen: pts.map(p => p.binnen),
-      buiten: pts.map(p => p.buiten),
-    };
+    return { labels, binnen, buiten, verwacht };
   }
-
   const pts = DATA.daily.filter(p => p.d >= start && p.d <= end);
   if (g === 'dag')
     return { labels: pts.map(p => p.d.slice(8,10)+'-'+p.d.slice(5,7)+'-'+p.d.slice(0,4)),
              binnen: pts.map(p => p.binnen), buiten: pts.map(p => p.buiten) };
   if (g === 'week')
-    return groupDaily(pts, d => { const w = isoWeek(d); return w.year + '-W' + String(w.week).padStart(2,'0'); },
-                      d => { const w = isoWeek(d); return 'wk ' + w.week + ' ' + w.year; });
-  // maand
-  return groupDaily(pts, d => d.slice(0,7), d => d.slice(5,7) + '-' + d.slice(0,4));
+    return groupDaily(pts, d => { const w = isoWeek(d); return w.year+'-W'+String(w.week).padStart(2,'0'); },
+                      d => { const w = isoWeek(d); return 'wk '+w.week+' '+w.year; });
+  return groupDaily(pts, d => d.slice(0,7), d => d.slice(5,7)+'-'+d.slice(0,4));
 }
 
 function render(){
   const s = buildSeries();
-  const cfg = {
-    type: 'line',
-    data: { labels: s.labels, datasets: [
-      { label: 'Binnen (Netatmo)', data: s.binnen, borderColor: '#e11d48', backgroundColor:'#e11d48',
-        tension: 0.25, spanGaps: true, pointRadius: 0, borderWidth: 2 },
-      { label: 'Buiten (Cockerillkaai)', data: s.buiten, borderColor: '#2563eb', backgroundColor:'#2563eb',
-        tension: 0.25, spanGaps: true, pointRadius: 0, borderWidth: 2 },
-    ]},
+  const datasets = [
+    { label: 'Binnen (Netatmo)', data: s.binnen, borderColor:'#e11d48', backgroundColor:'#e11d48',
+      tension: 0.25, spanGaps: true, pointRadius: 0, borderWidth: 2 },
+    { label: 'Buiten (Cockerillkaai)', data: s.buiten, borderColor:'#2563eb', backgroundColor:'#2563eb',
+      tension: 0.25, spanGaps: true, pointRadius: 0, borderWidth: 2 },
+  ];
+  if (s.verwacht && s.verwacht.some(v => v != null))
+    datasets.push({ label: 'Buiten (verwacht 48u)', data: s.verwacht, borderColor:'#93c5fd',
+      backgroundColor:'#93c5fd', borderDash: [6,4], tension: 0.25, spanGaps: true, pointRadius: 0, borderWidth: 2 });
+  const data = { labels: s.labels, datasets };
+  if (chart){ chart.data = data; chart.update(); return; }
+  chart = new Chart($('grafiek'), {
+    type: 'line', data,
     options: {
-      responsive: true,
+      responsive: true, maintainAspectRatio: false,
       interaction: { mode: 'index', intersect: false },
       scales: { x: { ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 12 } },
                 y: { title: { display: true, text: 'Temperatuur (°C)' } } },
       plugins: { legend: { position: 'top' } },
     },
-  };
-  if (chart){ chart.data = cfg.data; chart.update(); }
-  else chart = new Chart($('grafiek'), cfg);
+  });
 }
 </script>
 </body>
@@ -477,9 +580,16 @@ def main():
 
     start_date = min(in_daily) if in_daily else (datetime.now(tz=TZ) - timedelta(days=hourly_days)).strftime("%Y-%m-%d")
     out_daily = openmeteo_daily(lat, lon, start_date)
-    out_hourly = openmeteo_hourly(lat, lon, hourly_days)
+    out_hourly_all = openmeteo_hourly(lat, lon, hourly_days)
+    cur_out, cur_out_t = openmeteo_current(lat, lon)
 
-    build_outputs(dev, in_daily, out_daily, in_hourly, out_hourly, lat, lon)
+    now_h = datetime.now(tz=TZ).strftime("%Y-%m-%dT%H:00")
+    limit_h = (datetime.now(tz=TZ) + timedelta(hours=48)).strftime("%Y-%m-%dT%H:00")
+    out_hourly = {k: v for k, v in out_hourly_all.items() if k <= now_h}
+    forecast = {k: v for k, v in out_hourly_all.items() if now_h < k <= limit_h}
+    print(f"Open-Meteo uur: {len(out_hourly)} observaties, {len(forecast)} voorspeld (48u).")
+
+    build_outputs(dev, in_daily, out_daily, in_hourly, out_hourly, forecast, cur_out, cur_out_t, lat, lon)
 
 
 if __name__ == "__main__":
