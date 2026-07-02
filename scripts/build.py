@@ -306,7 +306,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Temperatuur: binnen vs. buiten (Cockerillkaai)</title>
+<title>Temperatuur Cockerillkaai 26</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <style>
   * { box-sizing: border-box; }
@@ -354,30 +354,26 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <body>
 <div class="wrap">
   <div class="head">
-    <h1 id="title">Binnen vs. buiten</h1>
+    <h1 id="title">Temperatuur Cockerillkaai 26</h1>
     <span class="badge" id="updated"></span>
   </div>
 
   <div class="stats">
-    <div class="stat in">
-      <div class="stat-label">Binnen nu (Netatmo)</div>
-      <div class="stat-val" id="curIn">–</div>
-      <div class="stat-time" id="curInT"></div>
-    </div>
     <div class="stat out">
-      <div class="stat-label">Buiten nu (Cockerillkaai)</div>
+      <div class="stat-label">Temperatuur buiten</div>
       <div class="stat-val" id="curOut">–</div>
-      <div class="stat-time" id="curOutT"></div>
+    </div>
+    <div class="stat in">
+      <div class="stat-label">Temperatuur binnen</div>
+      <div class="stat-val" id="curIn">–</div>
     </div>
     <div class="stat hum">
       <div class="stat-label">Vochtigheid binnen</div>
       <div class="stat-val" id="curHum">–</div>
-      <div class="stat-time"></div>
     </div>
     <div class="stat co2">
       <div class="stat-label">CO₂ binnen</div>
       <div class="stat-val" id="curCo2">–</div>
-      <div class="stat-time" id="curCo2T"></div>
     </div>
   </div>
 
@@ -424,7 +420,6 @@ function loadData(){
 loadData();
 
 function onData(){
-  $('title').textContent = 'Binnentemperatuur (' + DATA.station + ' – ' + DATA.indoor_name + ') vs. buiten Cockerillkaai';
   $('coord').textContent = DATA.lat + ', ' + DATA.lon;
   $('updated').textContent = 'bijgewerkt: ' + DATA.updated;
   showCurrent();
@@ -435,12 +430,9 @@ function onData(){
 
 function showCurrent(){
   $('curIn').textContent  = DATA.current_in  != null ? Number(DATA.current_in).toFixed(1)  + ' °C' : '–';
-  $('curInT').textContent = DATA.current_in_time ? 'om ' + DATA.current_in_time : '';
-  $('curOut').textContent  = DATA.current_out != null ? Number(DATA.current_out).toFixed(1) + ' °C' : '–';
-  $('curOutT').textContent = DATA.current_out_time ? 'om ' + DATA.current_out_time : '';
-  $('curHum').textContent  = DATA.current_hum != null ? Math.round(DATA.current_hum) + ' %' : '–';
-  $('curCo2').textContent  = DATA.current_co2 != null ? Math.round(DATA.current_co2) + ' ppm' : '–';
-  $('curCo2T').textContent = DATA.current_in_time ? 'om ' + DATA.current_in_time : '';
+  $('curOut').textContent = DATA.current_out != null ? Number(DATA.current_out).toFixed(1) + ' °C' : '–';
+  $('curHum').textContent = DATA.current_hum != null ? Math.round(DATA.current_hum) + ' %' : '–';
+  $('curCo2').textContent = DATA.current_co2 != null ? Math.round(DATA.current_co2) + ' ppm' : '–';
 }
 
 function refreshOutdoorLive(){
@@ -450,7 +442,6 @@ function refreshOutdoorLive(){
     const c = d.current;
     if (c && c.temperature_2m != null){
       $('curOut').textContent = Number(c.temperature_2m).toFixed(1) + ' °C';
-      $('curOutT').textContent = 'live';
     }
   }).catch(()=>{});
 }
