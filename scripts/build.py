@@ -152,18 +152,33 @@ def netatmo_find_device(access):
     }
 
 
-def _measure(access, device_id, scale, date_begin):
+def _measure(access, device_id, scale, date_begin, date_end=None, retries=4):
     headers = {"Authorization": f"Bearer {access}"}
     params = {
         "device_id": device_id, "scale": scale, "type": "temperature",
         "date_begin": int(date_begin), "optimize": "false",
     }
+    if date_end is not None:
+        params["date_end"] = int(date_end)
     url = NETATMO_MEASURE_URL + "?" + urllib.parse.urlencode(params)
-    try:
-        resp = http_get(url, headers=headers)
-    except urllib.error.HTTPError as e:
-        die(f"getmeasure ({scale}) mislukt (HTTP {e.code}). Antwoord: {e.read().decode('utf-8', 'ignore')}")
-    return resp.get("body", {}) or {}
+    for attempt in range(retries):
+        try:
+            resp = http_get(url, headers=headers)
+            return resp.get("body", {}) or {}
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode("utf-8", "ignore")
+            if e.code in (429, 500, 502, 503, 504) and attempt < retries - 1:
+                wait = 3 * (attempt + 1)
+                print(f"Info: getmeasure ({scale}) HTTP {e.code}; nieuwe poging over {wait}s...")
+                time.sleep(wait)
+                continue
+            raise RuntimeError(f"getmeasure ({scale}) HTTP {e.code}: {detail}")
+        except urllib.error.URLError as e:
+            if attempt < retries - 1:
+                time.sleep(3 * (attempt + 1))
+                continue
+            raise RuntimeError(f"getmeasure ({scale}) netwerkfout: {e}")
+    return {}
 
 
 def netatmo_daily_full(access, device_id, date_setup):
@@ -172,7 +187,11 @@ def netatmo_daily_full(access, device_id, date_setup):
     begin = date_setup if date_setup else now - 6 * 365 * 86400
     out = {}
     for _ in range(12):
-        body = _measure(access, device_id, "1day", begin)
+        try:
+            body = _measure(access, device_id, "1day", begin)
+        except RuntimeError as e:
+            print(f"Info: dagdata deels opgehaald, gestopt na fout: {e}")
+            break
         if not body:
             break
         last_ts = None
@@ -191,25 +210,27 @@ def netatmo_daily_full(access, device_id, date_setup):
 
 
 def netatmo_hourly_full(access, device_id, date_setup):
-    """Volledige historiek op uurbasis, via voorwaartse paginatie (1024/req)."""
+    """Uurhistorie van recent naar oud (1024/req). Bij een tijdelijke fout
+    stoppen we en behouden we wat al is opgehaald (recent zit er dan zeker in)."""
     now = int(time.time())
-    begin = date_setup if date_setup else now - 3 * 365 * 86400
+    floor = date_setup if date_setup else now - 6 * 365 * 86400
     out = {}
-    for _ in range(60):
-        body = _measure(access, device_id, "1hour", begin)
-        if not body:
+    end = now
+    for _ in range(150):
+        begin = max(end - 1024 * 3600, floor)
+        try:
+            body = _measure(access, device_id, "1hour", begin, end)
+        except RuntimeError as e:
+            print(f"Info: uurhistorie deels opgehaald, gestopt na fout: {e}")
             break
-        last_ts = None
-        for ts_str, vals in sorted(body.items(), key=lambda kv: int(kv[0])):
-            last_ts = int(ts_str)
+        for ts_str, vals in body.items():
             if vals and vals[0] is not None:
-                dt = datetime.fromtimestamp(last_ts, tz=timezone.utc).astimezone(TZ)
+                dt = datetime.fromtimestamp(int(ts_str), tz=timezone.utc).astimezone(TZ)
                 out[dt.strftime("%Y-%m-%dT%H:00")] = round(float(vals[0]), 1)
-        if last_ts is None or len(body) < 1000:
+        if begin <= floor:
             break
-        begin = last_ts + 3600
-        if begin > now:
-            break
+        end = begin - 3600
+        time.sleep(0.4)
     print(f"Netatmo uurdata (volledig): {len(out)} uren.")
     return out
 
