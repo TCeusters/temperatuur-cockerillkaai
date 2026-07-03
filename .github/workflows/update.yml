@@ -2,9 +2,7 @@ name: Temperatuurgrafiek bijwerken
 
 # Wanneer draait dit?
 on:
-  schedule:
-    - cron: "5 * * * *"       # elk uur (rond :05 na het uur, UTC)
-  workflow_dispatch: {}         # + handmatig te starten via de knop "Run workflow"
+  workflow_dispatch: {}         # gestart door cron-job.org (elk uur) of handmatig via "Run workflow"
 
 # Rechten die de workflow nodig heeft om naar GitHub Pages te publiceren
 permissions:
