@@ -48,10 +48,22 @@ def die(msg):
     sys.exit(1)
 
 
-def http_get(url, headers=None):
-    req = urllib.request.Request(url, headers=headers or {}, method="GET")
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+def http_get(url, headers=None, retries=4, timeout=60):
+    for attempt in range(retries):
+        try:
+            req = urllib.request.Request(url, headers=headers or {}, method="GET")
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            if e.code in (429, 500, 502, 503, 504) and attempt < retries - 1:
+                time.sleep(3 * (attempt + 1))
+                continue
+            raise
+        except (urllib.error.URLError, TimeoutError):
+            if attempt < retries - 1:
+                time.sleep(3 * (attempt + 1))
+                continue
+            raise
 
 
 def http_post_form(url, data):
@@ -161,24 +173,12 @@ def _measure(access, device_id, scale, date_begin, date_end=None, retries=4):
     if date_end is not None:
         params["date_end"] = int(date_end)
     url = NETATMO_MEASURE_URL + "?" + urllib.parse.urlencode(params)
-    for attempt in range(retries):
-        try:
-            resp = http_get(url, headers=headers)
-            return resp.get("body", {}) or {}
-        except urllib.error.HTTPError as e:
-            detail = e.read().decode("utf-8", "ignore")
-            if e.code in (429, 500, 502, 503, 504) and attempt < retries - 1:
-                wait = 3 * (attempt + 1)
-                print(f"Info: getmeasure ({scale}) HTTP {e.code}; nieuwe poging over {wait}s...")
-                time.sleep(wait)
-                continue
-            raise RuntimeError(f"getmeasure ({scale}) HTTP {e.code}: {detail}")
-        except urllib.error.URLError as e:
-            if attempt < retries - 1:
-                time.sleep(3 * (attempt + 1))
-                continue
-            raise RuntimeError(f"getmeasure ({scale}) netwerkfout: {e}")
-    return {}
+    try:
+        return http_get(url, headers=headers).get("body", {}) or {}
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"getmeasure ({scale}) HTTP {e.code}: {e.read().decode('utf-8', 'ignore')}")
+    except (urllib.error.URLError, TimeoutError) as e:
+        raise RuntimeError(f"getmeasure ({scale}) netwerkfout: {e}")
 
 
 def netatmo_daily_full(access, device_id, date_setup):
@@ -249,8 +249,8 @@ def openmeteo_daily(lat, lon, start_date):
                         data.get("daily", {}).get("temperature_2m_mean", [])):
             if t is not None:
                 out[d] = round(float(t), 1)
-    except urllib.error.HTTPError as e:
-        print(f"Info: Open-Meteo archief gaf HTTP {e.code}: {e.read().decode('utf-8', 'ignore')}")
+    except Exception as e:
+        print(f"Info: Open-Meteo archief (dag) mislukt: {e}")
     try:
         p = {"latitude": lat, "longitude": lon, "daily": "temperature_2m_mean",
              "past_days": 14, "forecast_days": 1, "timezone": "Europe/Brussels"}
@@ -259,8 +259,8 @@ def openmeteo_daily(lat, lon, start_date):
                         data.get("daily", {}).get("temperature_2m_mean", [])):
             if t is not None:
                 out[d] = round(float(t), 1)
-    except urllib.error.HTTPError as e:
-        print(f"Info: Open-Meteo forecast (dag) gaf HTTP {e.code}: {e.read().decode('utf-8', 'ignore')}")
+    except Exception as e:
+        print(f"Info: Open-Meteo forecast (dag) mislukt: {e}")
     print(f"Open-Meteo dagdata: {len(out)} dagen.")
     return out
 
@@ -277,8 +277,8 @@ def openmeteo_hourly_full(lat, lon, start_date):
                            data.get("hourly", {}).get("temperature_2m", [])):
             if temp is not None:
                 out[t[:13] + ":00"] = round(float(temp), 1)
-    except urllib.error.HTTPError as e:
-        print(f"Info: Open-Meteo archief (uur) gaf HTTP {e.code}: {e.read().decode('utf-8', 'ignore')}")
+    except Exception as e:
+        print(f"Info: Open-Meteo archief (uur) mislukt: {e}")
     try:
         p = {"latitude": lat, "longitude": lon, "hourly": "temperature_2m",
              "past_days": 14, "forecast_days": 3, "timezone": "Europe/Brussels"}
@@ -287,8 +287,8 @@ def openmeteo_hourly_full(lat, lon, start_date):
                            data.get("hourly", {}).get("temperature_2m", [])):
             if temp is not None:
                 out[t[:13] + ":00"] = round(float(temp), 1)
-    except urllib.error.HTTPError as e:
-        print(f"Info: Open-Meteo forecast (uur) gaf HTTP {e.code}: {e.read().decode('utf-8', 'ignore')}")
+    except Exception as e:
+        print(f"Info: Open-Meteo forecast (uur) mislukt: {e}")
     print(f"Open-Meteo uurdata (volledig): {len(out)} uren.")
     return out
 
@@ -297,8 +297,8 @@ def openmeteo_current(lat, lon):
     p = {"latitude": lat, "longitude": lon, "current": "temperature_2m", "timezone": "Europe/Brussels"}
     try:
         data = http_get(OPEN_METEO_FORECAST_URL + "?" + urllib.parse.urlencode(p))
-    except urllib.error.HTTPError as e:
-        print(f"Info: Open-Meteo current gaf HTTP {e.code}: {e.read().decode('utf-8', 'ignore')}")
+    except Exception as e:
+        print(f"Info: Open-Meteo current mislukt (niet-kritiek): {e}")
         return None, None
     c = data.get("current", {})
     t = c.get("temperature_2m")
