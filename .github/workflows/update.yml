@@ -1,25 +1,19 @@
 name: Temperatuurgrafiek bijwerken
 
-# Wanneer draait dit?
 on:
   workflow_dispatch: {}         # gestart door cron-job.org (elk uur) of handmatig via "Run workflow"
 
-# Rechten die de workflow nodig heeft om naar GitHub Pages te publiceren
+# Recht om naar de gh-pages branch te pushen
 permissions:
-  contents: read
-  pages: write
-  id-token: write
+  contents: write
 
 concurrency:
-  group: pages
+  group: publiceren
   cancel-in-progress: false
 
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Repo ophalen
         uses: actions/checkout@v4
@@ -34,9 +28,8 @@ jobs:
           LON: "4.399"
         run: python3 scripts/build.py
 
-      # Netatmo geeft soms een NIEUW refresh-token terug. Dat bewaren we hier
-      # als secret, zodat de taak morgen weer werkt. Draait ook als de stap
-      # hierboven faalde (if: always), zolang er een nieuw token bewaard werd.
+      # Netatmo geeft soms een NIEUW refresh-token terug; dat bewaren we als secret.
+      # Draait ook als de stap hierboven faalde, zolang er een nieuw token bewaard werd.
       - name: Nieuw refresh-token bewaren
         if: always()
         env:
@@ -52,11 +45,18 @@ jobs:
             echo "Geen nieuw refresh-token; niets te doen."
           fi
 
-      - name: Pages-artefact uploaden
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: public
-
-      - name: Publiceren naar GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
+      # Publiceer de gebouwde bestanden naar de gh-pages branch (force = altijd 1 commit,
+      # dus geen opeenstapelende historie / geen repo-bloat).
+      - name: Publiceren naar gh-pages branch
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd public
+          touch .nojekyll
+          git init -q
+          git checkout -q -b gh-pages
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -q -m "Site bijgewerkt: $(date -u +%Y-%m-%dT%H:%MZ)"
+          git push -f "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" gh-pages
