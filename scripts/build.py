@@ -308,6 +308,82 @@ def openmeteo_current(lat, lon):
 # --------------------------------------------------------------------------
 # 4. Samenvoegen en wegschrijven
 # --------------------------------------------------------------------------
+def load_history_csv(path):
+    """Laad de bestaande uurhistorie (van de vorige run) uit data.csv.
+    Geeft (in_hist, out_hist) met sleutels 'YYYY-MM-DDTHH:00'. Leeg bij ontbreken/fout."""
+    in_hist, out_hist = {}, {}
+    if not os.path.exists(path):
+        return in_hist, out_hist
+    try:
+        with open(path, newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                t = (row.get("tijd") or "").strip().replace(" ", "T")
+                if len(t) < 13:
+                    continue
+                t = t[:13] + ":00"
+                b = (row.get("binnen_C") or "").strip()
+                o = (row.get("buiten_C") or "").strip()
+                if b:
+                    try:
+                        in_hist[t] = round(float(b), 1)
+                    except ValueError:
+                        pass
+                if o:
+                    try:
+                        out_hist[t] = round(float(o), 1)
+                    except ValueError:
+                        pass
+    except Exception as e:
+        print(f"Info: bestaande historie niet leesbaar ({e}); volledige ophaling als terugval.")
+        return {}, {}
+    print(f"Historie geladen: {len(in_hist)} binnen- en {len(out_hist)} buiten-uren.")
+    return in_hist, out_hist
+
+
+def daily_from_hourly(hourly):
+    """Dagelijkse gemiddelden uit uurdata (sleutels 'YYYY-MM-DDTHH:00')."""
+    buckets = {}
+    for k, v in hourly.items():
+        if v is None:
+            continue
+        buckets.setdefault(k[:10], []).append(v)
+    return {d: round(sum(vals) / len(vals), 1) for d, vals in buckets.items() if vals}
+
+
+def netatmo_hourly_recent(access, device_id, days):
+    """Enkel de laatste 'days' dagen aan uurdata (1 oproep). Leeg bij fout."""
+    now = int(time.time())
+    try:
+        body = _measure(access, device_id, "1hour", now - days * 86400)
+    except RuntimeError as e:
+        print(f"Info: recente uurdata niet opgehaald: {e}")
+        return {}
+    out = {}
+    for ts_str, vals in body.items():
+        if vals and vals[0] is not None:
+            dt = datetime.fromtimestamp(int(ts_str), tz=timezone.utc).astimezone(TZ)
+            out[dt.strftime("%Y-%m-%dT%H:00")] = round(float(vals[0]), 1)
+    print(f"Netatmo uurdata (recent, {days}d): {len(out)} uren.")
+    return out
+
+
+def openmeteo_hourly_recent(lat, lon, past_days):
+    """Recente buiten-uurdata (verleden + ~3 dagen voorspelling), 1 oproep."""
+    p = {"latitude": lat, "longitude": lon, "hourly": "temperature_2m",
+         "past_days": min(past_days, 92), "forecast_days": 3, "timezone": "Europe/Brussels"}
+    try:
+        data = http_get(OPEN_METEO_FORECAST_URL + "?" + urllib.parse.urlencode(p))
+    except Exception as e:
+        print(f"Info: Open-Meteo recent niet opgehaald: {e}")
+        return {}
+    out = {}
+    for t, temp in zip(data.get("hourly", {}).get("time", []),
+                       data.get("hourly", {}).get("temperature_2m", [])):
+        if temp is not None:
+            out[t[:13] + ":00"] = round(float(temp), 1)
+    return out
+
+
 def build_outputs(dev, in_daily, out_daily, in_hourly, out_hourly, forecast, csv_rows, cur_out, cur_out_t, lat, lon):
     os.makedirs(OUT_DIR, exist_ok=True)
 
@@ -613,35 +689,46 @@ def main():
     access = netatmo_refresh_access_token()
     dev = netatmo_find_device(access)
 
-    in_daily = netatmo_daily_full(access, dev["id"], dev["date_setup"])
-    in_hourly_full = netatmo_hourly_full(access, dev["id"], dev["date_setup"])
-
-    if in_daily:
-        start_date = min(in_daily)
-    elif in_hourly_full:
-        start_date = min(in_hourly_full)[:10]
-    else:
-        start_date = (datetime.now(tz=TZ) - timedelta(days=hourly_days)).strftime("%Y-%m-%d")
-
-    out_daily = openmeteo_daily(lat, lon, start_date)
-    out_hourly_full = openmeteo_hourly_full(lat, lon, start_date)
-    cur_out, cur_out_t = openmeteo_current(lat, lon)
-
     now_h = datetime.now(tz=TZ).strftime("%Y-%m-%dT%H:00")
     limit_h = (datetime.now(tz=TZ) + timedelta(hours=48)).strftime("%Y-%m-%dT%H:00")
     recent_h = (datetime.now(tz=TZ) - timedelta(days=hourly_days)).strftime("%Y-%m-%dT%H:00")
 
-    out_hourly_obs = {k: v for k, v in out_hourly_full.items() if k <= now_h}
-    forecast = {k: v for k, v in out_hourly_full.items() if now_h < k <= limit_h}
+    # Bestaande uurhistorie van de vorige run (door de workflow uit gh-pages gezet)
+    in_hist, out_hist = load_history_csv(os.path.join(OUT_DIR, "data.csv"))
 
-    # Volledige uurhistorie voor de CSV-export (binnen + buiten, tot nu)
-    csv_keys = sorted(set(in_hourly_full) | set(out_hourly_obs))
-    csv_rows = [{"t": k, "binnen": in_hourly_full.get(k), "buiten": out_hourly_obs.get(k)} for k in csv_keys]
+    if in_hist or out_hist:
+        # INCREMENTEEL: enkel de recente uren bijhalen -> veel minder Netatmo-oproepen
+        refresh_days = int(os.environ.get("REFRESH_DAYS", "4"))
+        in_hist.update(netatmo_hourly_recent(access, dev["id"], refresh_days))
+        om = openmeteo_hourly_recent(lat, lon, 35)
+    else:
+        # EERSTE KEER / TERUGVAL: volledige historie ophalen
+        print("Geen bestaande historie; volledige ophaling (eenmalig).")
+        in_hist = netatmo_hourly_full(access, dev["id"], dev["date_setup"])
+        start_date = (min(in_hist)[:10] if in_hist
+                      else (datetime.now(tz=TZ) - timedelta(days=hourly_days)).strftime("%Y-%m-%d"))
+        om = openmeteo_hourly_full(lat, lon, start_date)
+
+    # Open-Meteo: waargenomen uren in de historie, voorspelling apart
+    for k, v in om.items():
+        if k <= now_h:
+            out_hist[k] = v
+    forecast = {k: v for k, v in om.items() if now_h < k <= limit_h}
+
+    cur_out, cur_out_t = openmeteo_current(lat, lon)
+
+    # Dag/week/maand afgeleid uit de volledige uurhistorie (geen extra oproepen)
+    in_daily = daily_from_hourly(in_hist)
+    out_daily = daily_from_hourly(out_hist)
+
+    # CSV = volledige uurhistorie (binnen + buiten, tot nu)
+    csv_keys = sorted(set(in_hist) | set(out_hist))
+    csv_rows = [{"t": k, "binnen": in_hist.get(k), "buiten": out_hist.get(k)} for k in csv_keys]
 
     # Recente uurdata voor de interactieve pagina (houdt de pagina snel)
-    in_hourly = {k: v for k, v in in_hourly_full.items() if k >= recent_h}
-    out_hourly = {k: v for k, v in out_hourly_obs.items() if k >= recent_h}
-    print(f"CSV: {len(csv_rows)} uren; pagina: {len(in_hourly)} recente uren; voorspeld: {len(forecast)}.")
+    in_hourly = {k: v for k, v in in_hist.items() if k >= recent_h}
+    out_hourly = {k: v for k, v in out_hist.items() if k >= recent_h}
+    print(f"CSV: {len(csv_rows)} uren; pagina: {len(in_hourly)} recente binnen-uren; voorspeld: {len(forecast)}.")
 
     build_outputs(dev, in_daily, out_daily, in_hourly, out_hourly, forecast, csv_rows, cur_out, cur_out_t, lat, lon)
 
