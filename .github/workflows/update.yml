@@ -18,18 +18,31 @@ jobs:
       - name: Repo ophalen
         uses: actions/checkout@v4
 
+      # Laad de bestaande uurhistorie uit gh-pages als startpunt, zodat het script
+      # enkel de nieuwe uren hoeft op te halen (veel minder Netatmo-oproepen).
+      - name: Bestaande historie laden (uit gh-pages)
+        run: |
+          mkdir -p public
+          git fetch origin gh-pages --depth=1 2>/dev/null || true
+          if git show origin/gh-pages:data.csv > public/data.csv 2>/dev/null; then
+            echo "Historie geladen: $(wc -l < public/data.csv) regels."
+          else
+            echo "Geen bestaande historie; eerste run doet volledige ophaling."
+            rm -f public/data.csv
+          fi
+
       - name: Grafiek + CSV genereren
         env:
           NETATMO_CLIENT_ID: ${{ secrets.NETATMO_CLIENT_ID }}
           NETATMO_CLIENT_SECRET: ${{ secrets.NETATMO_CLIENT_SECRET }}
           NETATMO_REFRESH_TOKEN: ${{ secrets.NETATMO_REFRESH_TOKEN }}
           HOURLY_DAYS: "42"
+          REFRESH_DAYS: "4"
           LAT: "51.212"
           LON: "4.399"
         run: python3 scripts/build.py
 
       # Netatmo geeft soms een NIEUW refresh-token terug; dat bewaren we als secret.
-      # Draait ook als de stap hierboven faalde, zolang er een nieuw token bewaard werd.
       - name: Nieuw refresh-token bewaren
         if: always()
         env:
@@ -45,8 +58,7 @@ jobs:
             echo "Geen nieuw refresh-token; niets te doen."
           fi
 
-      # Publiceer de gebouwde bestanden naar de gh-pages branch (force = altijd 1 commit,
-      # dus geen opeenstapelende historie / geen repo-bloat).
+      # Publiceer de gebouwde bestanden naar de gh-pages branch (force = altijd 1 commit).
       - name: Publiceren naar gh-pages branch
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
