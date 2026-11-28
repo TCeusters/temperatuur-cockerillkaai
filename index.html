@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Temperatuur Cockerillkaai 26</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+         margin: 0; padding: 20px; color: #1a1a1a; background: #fafafa; }
+  .wrap { max-width: 1040px; margin: 0 auto; }
+  .head { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 6px; }
+  h1 { font-size: 18px; margin: 0; }
+  .badge { color: #8a8a8a; font-size: 12px; }
+  .stats { display: flex; gap: 12px; flex-wrap: wrap; margin: 14px 0 6px; }
+  .stat { flex: 1 1 calc(25% - 9px); background: #fff; border: 1px solid #e5e5e5; border-radius: 12px; padding: 14px 16px; }
+  .stat-label { font-size: 12px; color: #666; }
+  .stat-val { font-size: 34px; font-weight: 650; line-height: 1.05; margin-top: 4px; }
+  .stat.in .stat-val { color: #e11d48; }
+  .stat.out .stat-val { color: #2563eb; }
+  .stat.hum .stat-val { color: #0891b2; }
+  .stat.co2 .stat-val { color: #65a30d; }
+  .stat-time { font-size: 11px; color: #9a9a9a; margin-top: 3px; }
+  .controls { display: flex; gap: 10px 12px; align-items: center; flex-wrap: wrap; margin: 14px 0 6px; }
+  .seg button { border: 1px solid #d0d0d0; background: #fff; padding: 7px 13px; cursor: pointer; font-size: 13px; }
+  .seg button:first-child { border-radius: 6px 0 0 6px; }
+  .seg button:last-child { border-radius: 0 6px 6px 0; }
+  .seg button + button { border-left: none; }
+  .seg button.active { background: #1a1a1a; color: #fff; border-color: #1a1a1a; }
+  select, input[type=date] { padding: 7px 8px; font-size: 13px; border: 1px solid #d0d0d0; border-radius: 6px; background: #fff; }
+  #refresh { padding: 7px 13px; font-size: 13px; border: 1px solid #d0d0d0; border-radius: 6px;
+             background: #fff; cursor: pointer; }
+  #refresh:active { background: #eee; }
+  .note { color: #a15c00; font-size: 12px; min-height: 15px; margin: 2px 0 8px; }
+  .card { background: #fff; border: 1px solid #e5e5e5; border-radius: 12px; padding: 16px;
+          box-shadow: 0 1px 3px rgba(0,0,0,0.04); }
+  .chartbox { position: relative; height: 58vh; min-height: 320px; }
+  .foot { color: #888; font-size: 12px; margin-top: 14px; }
+  a { color: #2563eb; }
+  label { font-size: 13px; color: #555; }
+  @media (max-width: 640px) {
+    body { padding: 12px; }
+    h1 { font-size: 15px; }
+    .stat { flex: 1 1 calc(50% - 6px); }
+    .stat-val { font-size: 30px; }
+    .chartbox { height: 62vh; min-height: 360px; }
+    .card { padding: 10px; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="head">
+    <h1 id="title">Temperatuur Cockerillkaai 26</h1>
+    <span class="badge" id="updated"></span>
+  </div>
+
+  <div class="stats">
+    <div class="stat out">
+      <div class="stat-label">Temperatuur buiten</div>
+      <div class="stat-val" id="curOut">–</div>
+    </div>
+    <div class="stat in">
+      <div class="stat-label">Temperatuur binnen</div>
+      <div class="stat-val" id="curIn">–</div>
+    </div>
+    <div class="stat hum">
+      <div class="stat-label">Vochtigheid binnen</div>
+      <div class="stat-val" id="curHum">–</div>
+    </div>
+    <div class="stat co2">
+      <div class="stat-label">CO₂ binnen</div>
+      <div class="stat-val" id="curCo2">–</div>
+    </div>
+  </div>
+
+  <div class="controls">
+    <div class="seg" id="gran">
+      <button data-g="uur">Uur</button>
+      <button data-g="dag">Dag</button>
+      <button data-g="week">Week</button>
+      <button data-g="maand">Maand</button>
+    </div>
+    <label>Periode:
+      <select id="period">
+        <option value="7">Laatste 7 dagen</option>
+        <option value="30">Laatste 30 dagen</option>
+        <option value="90">Laatste 3 maanden</option>
+        <option value="365">Laatste 12 maanden</option>
+        <option value="all">Alles</option>
+        <option value="custom">Aangepast…</option>
+      </select>
+    </label>
+    <span id="customRange" style="display:none">
+      <input type="date" id="from"> – <input type="date" id="to">
+    </span>
+  </div>
+
+  <div class="note" id="note"></div>
+  <div class="card"><div class="chartbox"><canvas id="grafiek"></canvas></div></div>
+  <div class="foot">
+    Buitentemperatuur: Open-Meteo (<span id="coord"></span>).
+    &nbsp;|&nbsp; <a href="data.csv" download>Download volledige uurdata (CSV)</a>
+  </div>
+</div>
+<script>
+let DATA = null, chart = null, wired = false;
+const $ = id => document.getElementById(id);
+const LS = { get:(k,d)=>localStorage.getItem('ck_'+k)||d, set:(k,v)=>localStorage.setItem('ck_'+k,v) };
+
+function loadData(){
+  fetch('data.json?t=' + Date.now(), {cache:'no-store'})
+    .then(r => r.json())
+    .then(d => { DATA = d; onData(); })
+    .catch(e => { $('note').textContent = 'Kon data niet laden: ' + e; });
+}
+loadData();
+
+function onData(){
+  $('coord').textContent = DATA.lat + ', ' + DATA.lon;
+  $('updated').textContent = 'bijgewerkt: ' + DATA.updated;
+  showCurrent();
+  refreshOutdoorLive();
+  if (!wired) wireControls();
+  render();
+}
+
+function showCurrent(){
+  $('curIn').textContent  = DATA.current_in  != null ? Number(DATA.current_in).toFixed(1)  + ' °C' : '–';
+  $('curOut').textContent = DATA.current_out != null ? Number(DATA.current_out).toFixed(1) + ' °C' : '–';
+  $('curHum').textContent = DATA.current_hum != null ? Math.round(DATA.current_hum) + ' %' : '–';
+  $('curCo2').textContent = DATA.current_co2 != null ? Math.round(DATA.current_co2) + ' ppm' : '–';
+}
+
+function refreshOutdoorLive(){
+  const url = 'https://api.open-meteo.com/v1/forecast?latitude=' + DATA.lat +
+              '&longitude=' + DATA.lon + '&current=temperature_2m&timezone=Europe%2FBrussels';
+  fetch(url, {cache:'no-store'}).then(r => r.json()).then(d => {
+    const c = d.current;
+    if (c && c.temperature_2m != null){
+      $('curOut').textContent = Number(c.temperature_2m).toFixed(1) + ' °C';
+    }
+  }).catch(()=>{});
+}
+
+function wireControls(){
+  wired = true;
+  const g = LS.get('g', 'dag');
+  document.querySelectorAll('#gran button').forEach(b => {
+    b.classList.toggle('active', b.dataset.g === g);
+    b.onclick = () => setGran(b.dataset.g);
+  });
+  $('period').value = LS.get('period', '30');
+  $('from').value = LS.get('from', '');
+  $('to').value = LS.get('to', '');
+  $('period').onchange = () => { LS.set('period', $('period').value); toggleCustom(); render(); };
+  $('from').onchange = () => { LS.set('from', $('from').value); render(); };
+  $('to').onchange = () => { LS.set('to', $('to').value); render(); };
+  toggleCustom();
+}
+
+function setGran(g){
+  LS.set('g', g);
+  document.querySelectorAll('#gran button').forEach(b => b.classList.toggle('active', b.dataset.g === g));
+  render();
+}
+function toggleCustom(){ $('customRange').style.display = $('period').value === 'custom' ? 'inline' : 'none'; }
+
+function periodBounds(){
+  const p = $('period').value;
+  if (p === 'custom') return { start: $('from').value || '0000-01-01', end: $('to').value || '9999-12-31' };
+  if (p === 'all')    return { start: '0000-01-01', end: '9999-12-31' };
+  const s = new Date(Date.now() - parseInt(p,10)*86400000);
+  return { start: s.toISOString().slice(0,10), end: '9999-12-31' };
+}
+
+function avg(a){ return a.length ? Math.round(a.reduce((x,y)=>x+y,0)/a.length*10)/10 : null; }
+function isoWeek(ds){
+  const d = new Date(ds + 'T00:00:00Z');
+  const day = (d.getUTCDay() + 6) % 7;
+  d.setUTCDate(d.getUTCDate() - day + 3);
+  const f = new Date(Date.UTC(d.getUTCFullYear(), 0, 4));
+  const week = 1 + Math.round(((d - f)/86400000 - 3 + ((f.getUTCDay()+6)%7))/7);
+  return { year: d.getUTCFullYear(), week };
+}
+function groupDaily(points, keyFn, labelFn){
+  const m = new Map();
+  for (const p of points){
+    const k = keyFn(p.d);
+    if (!m.has(k)) m.set(k, { b:[], o:[], label: labelFn(p.d) });
+    const g = m.get(k);
+    if (p.binnen != null) g.b.push(p.binnen);
+    if (p.buiten != null) g.o.push(p.buiten);
+  }
+  const keys = [...m.keys()].sort();
+  return { labels: keys.map(k=>m.get(k).label), binnen: keys.map(k=>avg(m.get(k).b)), buiten: keys.map(k=>avg(m.get(k).o)) };
+}
+
+function buildSeries(){
+  const { start, end } = periodBounds();
+  const g = LS.get('g', 'dag');
+  $('note').textContent = '';
+  if (g === 'uur'){
+    const pts = DATA.hourly.filter(p => p.t.slice(0,10) >= start && p.t.slice(0,10) <= end);
+    if (DATA.hourly_from && start < DATA.hourly_from.slice(0,10))
+      $('note').textContent = 'Uurweergave is beschikbaar vanaf ' + DATA.hourly_from.slice(0,10) + '. Kies Dag/Week/Maand voor oudere periodes.';
+    const fc = (DATA.forecast || []).filter(p => p.t.slice(0,10) <= end);
+    const fmt = t => t.slice(8,10)+'-'+t.slice(5,7)+' '+t.slice(11,16);
+    const labels = pts.map(p => fmt(p.t)).concat(fc.map(p => fmt(p.t)));
+    const binnen = pts.map(p => p.binnen).concat(fc.map(() => null));
+    const buiten = pts.map(p => p.buiten).concat(fc.map(() => null));
+    const verwacht = pts.map(() => null).concat(fc.map(p => p.buiten));
+    if (pts.length && fc.length){
+      for (let i = pts.length - 1; i >= 0; i--){ if (pts[i].buiten != null){ verwacht[i] = pts[i].buiten; break; } }
+    }
+    return { labels, binnen, buiten, verwacht };
+  }
+  const pts = DATA.daily.filter(p => p.d >= start && p.d <= end);
+  if (g === 'dag')
+    return { labels: pts.map(p => p.d.slice(8,10)+'-'+p.d.slice(5,7)+'-'+p.d.slice(0,4)),
+             binnen: pts.map(p => p.binnen), buiten: pts.map(p => p.buiten) };
+  if (g === 'week')
+    return groupDaily(pts, d => { const w = isoWeek(d); return w.year+'-W'+String(w.week).padStart(2,'0'); },
+                      d => { const w = isoWeek(d); return 'wk '+w.week+' '+w.year; });
+  return groupDaily(pts, d => d.slice(0,7), d => d.slice(5,7)+'-'+d.slice(0,4));
+}
+
+function render(){
+  const s = buildSeries();
+  const datasets = [
+    { label: 'Binnen (Netatmo)', data: s.binnen, borderColor:'#e11d48', backgroundColor:'#e11d48',
+      tension: 0.25, spanGaps: true, pointRadius: 0, borderWidth: 2 },
+    { label: 'Buiten (Cockerillkaai)', data: s.buiten, borderColor:'#2563eb', backgroundColor:'#2563eb',
+      tension: 0.25, spanGaps: true, pointRadius: 0, borderWidth: 2 },
+  ];
+  if (s.verwacht && s.verwacht.some(v => v != null))
+    datasets.push({ label: 'Buiten (verwacht 48u)', data: s.verwacht, borderColor:'#93c5fd',
+      backgroundColor:'#93c5fd', borderDash: [6,4], tension: 0.25, spanGaps: true, pointRadius: 0, borderWidth: 2 });
+  const data = { labels: s.labels, datasets };
+  if (chart){ chart.data = data; chart.update(); return; }
+  chart = new Chart($('grafiek'), {
+    type: 'line', data,
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      scales: { x: { ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 12 } },
+                y: { title: { display: true, text: 'Temperatuur (°C)' } } },
+      plugins: { legend: { position: 'top' } },
+    },
+  });
+}
+</script>
+</body>
+</html>
